@@ -3,11 +3,14 @@ import Coloris from '@melloware/coloris';
 
 const canvas = document.getElementById("canvas") as HTMLCanvasElement;
 const ctx = canvas.getContext("2d")!;
+const simCanvas = document.getElementById("simCanvas") as HTMLCanvasElement;
+const simCtx = simCanvas.getContext("2d")!;
 const addHorseBtn = document.getElementById("addHorse") as HTMLButtonElement;
 const horseList = document.getElementById("horseList") as HTMLDivElement;
 const playBtn = document.getElementById("playBtn") as HTMLButtonElement;
 const pauseBtn = document.getElementById("pauseBtn") as HTMLButtonElement;
 const stopBtn = document.getElementById("stopBtn") as HTMLButtonElement;
+const sBtn = document.getElementById("sBtn") as HTMLButtonElement;
 
 let courseImage: HTMLImageElement | null = null;
 let collisionData: Uint8ClampedArray;
@@ -17,121 +20,208 @@ const obstacleThreshold = 10;
 let isPlaying = false;
 let isPaused = false;
 let animationFrameId: number | null = null;
+let simulationActive = false;
+let isPlayback = false;
+const playbackFrames = 20 * 60;
+let playbackStates: SimState[][] = [];
+let playbackFrameIndex = 0;
 
 // Playback control functions
 function play() {
-  if (isPaused) {
-    isPaused = false;
+  // halt live animation before starting playback
+  pause();
+  // If already playing back, resume if paused, else do nothing
+  if (isPlayback) {
+    if (isPlaying) return;
     isPlaying = true;
-    animate();
-  } else if (!isPlaying) {
-    isPlaying = true;
-    animate();
+    playbackStep();
+    return;
   }
+  // First-time play: generate and cache playback frames
+  // Reset horses to their defined start positions and velocities
+  horses.forEach(h => {
+    h.startX = h.initX;
+    h.startY = h.initY;
+    h.vx = h.speed * Math.cos(h.startRotation);
+    h.vy = h.speed * Math.sin(h.startRotation);
+  });
+  // Build cache
+  playbackStates = [];
+  const initial = horses.map(h => ({ x: h.startX, y: h.startY, vx: h.vx, vy: h.vy, radius: h.radius, speed: h.speed }));
+  playbackStates[0] = initial;
+  for (let i = 1; i < playbackFrames; i++) {
+    playbackStates[i] = computeNextStates(playbackStates[i - 1]);
+  }
+  // Start playback
+  isPlayback = true;
+  isPaused = false;
+  isPlaying = true;
+  playbackFrameIndex = 0;
+  playbackStep();
+}
+
+function playbackStep() {
+  if (!isPlayback || !isPlaying) return;
+  if (playbackFrameIndex >= playbackFrames) {
+    // End of playback cache: act like a pause
+    isPlayback = false;
+    isPlaying = false;
+    isPaused = true;
+    playbackStates = [];
+    return;
+  }
+  // Apply cached frame
+  const states = playbackStates[playbackFrameIndex];
+  states.forEach((s, i) => {
+    const h = horses[i];
+    h.startX = s.x;
+    h.startY = s.y;
+    h.vx = s.vx;
+    h.vy = s.vy;
+  });
+  playbackFrameIndex++;
+  draw();
+  requestAnimationFrame(playbackStep);
 }
 
 function pause() {
-  if (isPlaying) {
+  if (isPlayback && isPlaying) {
     isPlaying = false;
     isPaused = true;
-    if (animationFrameId !== null) {
-      cancelAnimationFrame(animationFrameId);
-      animationFrameId = null;
-    }
   }
 }
 
 function stop() {
-  if (isPlaying || isPaused) {
+  if (isPlayback || isPlaying || isPaused) {
     isPlaying = false;
     isPaused = false;
+    isPlayback = false;
     if (animationFrameId !== null) {
       cancelAnimationFrame(animationFrameId);
       animationFrameId = null;
     }
-    // Reset horses to center
-    horses.forEach(horse => {
-      horse.startX = canvas.width / 2;
-      horse.startY = canvas.height / 2;
+    simCtx.clearRect(0, 0, simCanvas.width, simCanvas.height);
+    horses.forEach(h => {
+      h.startX = h.initX;
+      h.startY = h.initY;
+      h.vx = h.speed * Math.cos(h.startRotation);
+      h.vy = h.speed * Math.sin(h.startRotation);
     });
+    playbackStates = [];
+    playbackFrameIndex = 0;
+    // Immediately redraw to show reset positions
+    draw();
   }
 }
 
-function animate() {
-  if (!isPlaying) return;
-  
-  horses.forEach(horse => {
-    let theta = horse.startRotation;
-    let dx = horse.speed * Math.cos(theta);
-    let dy = horse.speed * Math.sin(theta);
-    let newX = horse.startX + dx;
-    let newY = horse.startY + dy;
+// Simulation state type
+interface SimState {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  radius: number;
+  speed: number;
+}
 
-    // Bounce off obstacles by sampling 16 points around the circumference
+// Compute next states by applying movement, collisions, and bounces
+function computeNextStates(states: SimState[]): SimState[] {
+  // shallow clone array and objects
+  const next = states.map(s => ({ ...s }));
+  const len = next.length;
+  
+  // Obstacle & wall bounces
+  next.forEach(s => {
+    let newX = s.x + s.vx;
+    let newY = s.y + s.vy;
+    // obstacle bounce
     for (let i = 0; i < 16; i++) {
-      const sampleAngle = (2 * Math.PI * i) / 16;
-      const sx = newX + horse.radius * Math.cos(sampleAngle);
-      const sy = newY + horse.radius * Math.sin(sampleAngle);
+      const sa = (2 * Math.PI * i) / 16;
+      const sx = newX + s.radius * Math.cos(sa);
+      const sy = newY + s.radius * Math.sin(sa);
       if (isObstacle(sx, sy)) {
-        // Approximate normal from obstacle point to center
-        const nx = Math.cos(sampleAngle);
-        const ny = Math.sin(sampleAngle);
-        // Reflect velocity across normal
-        const dot = dx * nx + dy * ny;
-        dx = dx - 2 * dot * nx;
-        dy = dy - 2 * dot * ny;
-        theta = Math.atan2(dy, dx);
-        horse.startRotation = theta;
-        newX = horse.startX + dx;
-        newY = horse.startY + dy;
+        let { nx, ny } = getObstacleNormal(sx, sy);
+        if (nx === 0 && ny === 0) { nx = Math.cos(sa); ny = Math.sin(sa); }
+        const dot = s.vx * nx + s.vy * ny;
+        s.vx -= 2 * dot * nx;
+        s.vy -= 2 * dot * ny;
+        newX = s.x + s.vx;
+        newY = s.y + s.vy;
         break;
       }
     }
-
-    // Bounce off other horses using surface normal reflection
-    horses.forEach(other => {
-      if (other.id !== horse.id) {
-        const dist = Math.hypot(newX - other.startX, newY - other.startY);
-        if (dist <= horse.radius + other.radius) {
-          // Normal vector from horse to other
-          const nx = (other.startX - horse.startX) / dist;
-          const ny = (other.startY - horse.startY) / dist;
-          // Reflect this horse's velocity across normal
-          const dot = dx * nx + dy * ny;
-          dx = dx - 2 * dot * nx;
-          dy = dy - 2 * dot * ny;
-          theta = Math.atan2(dy, dx);
-          horse.startRotation = theta;
-          newX = horse.startX + dx;
-          newY = horse.startY + dy;
-          // Reflect other horse's velocity similarly
-          let dx2 = other.speed * Math.cos(other.startRotation);
-          let dy2 = other.speed * Math.sin(other.startRotation);
-          const dot2 = dx2 * nx + dy2 * ny;
-          dx2 = dx2 - 2 * dot2 * nx;
-          dy2 = dy2 - 2 * dot2 * ny;
-          other.startRotation = Math.atan2(dy2, dx2);
-        }
-      }
-    });
-
-    // Wrap around edges
-    if (newX < 0) newX = canvas.width;
-    else if (newX > canvas.width) newX = 0;
-    if (newY < 0) newY = canvas.height;
-    else if (newY > canvas.height) newY = 0;
-
-    horse.startX = newX;
-    horse.startY = newY;
+    // wall bounce
+    if (newX - s.radius < 0 || newX + s.radius > canvas.width) {
+      s.vx = -s.vx; newX = s.x + s.vx;
+    }
+    if (newY - s.radius < 0 || newY + s.radius > canvas.height) {
+      s.vy = -s.vy; newY = s.y + s.vy;
+    }
+    s.x = newX;
+    s.y = newY;
   });
+  
+  // Horse–horse collisions
+  for (let i = 0; i < len; i++) {
+    for (let j = i + 1; j < len; j++) {
+      const a = next[i], b = next[j];
+      const dx = a.x - b.x, dy = a.y - b.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist < a.radius + b.radius) {
+        const nx = dx / dist, ny = dy / dist;
+        const da = a.vx * nx + a.vy * ny;
+        const db = b.vx * nx + b.vy * ny;
+        a.vx -= 2 * da * nx; a.vy -= 2 * da * ny;
+        b.vx -= 2 * db * nx; b.vy -= 2 * db * ny;
+        // separate overlap
+        const overlap = (a.radius + b.radius - dist) / 2;
+        a.x += nx * overlap; a.y += ny * overlap;
+        b.x -= nx * overlap; b.y -= ny * overlap;
+      }
+    }
+  }
+  
+  // normalize speeds
+  next.forEach(s => {
+    const mag = Math.hypot(s.vx, s.vy);
+    if (mag > 0) {
+      s.vx = (s.vx / mag) * s.speed;
+      s.vy = (s.vy / mag) * s.speed;
+    }
+  });
+  return next;
+}
 
-  animationFrameId = requestAnimationFrame(animate);
+// Refactor simulate() to use computeNextStates
+function simulate() {
+  pause();
+  simCtx.clearRect(0, 0, simCanvas.width, simCanvas.height);
+  const frames = 20 * 60;
+  const colors = horses.map(h => opaqueColor(h.tint));
+  let simStates: SimState[] = horses.map(h => ({ x: h.initX, y: h.initY, vx: h.vx, vy: h.vy, radius: h.radius, speed: h.speed }));
+  const prev = simStates.map(s => ({ x: s.x, y: s.y }));
+  for (let f = 0; f < frames; f++) {
+    simStates = computeNextStates(simStates);
+    simStates.forEach((s, idx) => {
+      simCtx.beginPath(); simCtx.strokeStyle = colors[idx]; simCtx.lineWidth = 1;
+      simCtx.moveTo(prev[idx].x, prev[idx].y); simCtx.lineTo(s.x, s.y); simCtx.stroke();
+      prev[idx].x = s.x; prev[idx].y = s.y;
+    });
+  }
+  // draw end circles
+  simStates.forEach((s, idx) => {
+    simCtx.beginPath(); simCtx.arc(s.x, s.y, s.radius / 2, 0, 2 * Math.PI);
+    simCtx.fillStyle = colors[idx]; simCtx.fill();
+  });
 }
 
 // Add event listeners for playback controls
 playBtn.addEventListener("click", play);
 pauseBtn.addEventListener("click", pause);
 stopBtn.addEventListener("click", stop);
+
+// Add event listener for simulate button
+sBtn.addEventListener("click", simulate);
 
 // {{ edit_1: define Horse type and storage }}
 interface Horse {
@@ -147,6 +237,10 @@ interface Horse {
   startY: number;
   radius: number;
   startRotation: number;
+  vx: number; // x velocity component
+  vy: number; // y velocity component
+  initX: number;   // initial start position X
+  initY: number;   // initial start position Y
 }
 let horses: Horse[] = [];
 let horseIdCounter = 1;
@@ -185,63 +279,49 @@ function opaqueColor(color: string): string {
   return `rgba(${r},${g},${b},1)`;
 }
 
+// Central draw function for normal rendering and playback mode
 function draw() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-  if (courseImage) {
-    ctx.drawImage(courseImage, 0, 0, canvas.width, canvas.height);
-
-    // in dev mode, overlay obstacles in semi-transparent red
-    if (development && collisionData) {
-      const overlay = ctx.createImageData(canvas.width, canvas.height);
-      for (let i = 0; i < collisionData.length; i += 4) {
-        // alpha channel at i+3
-        if (collisionData[i + 3] > obstacleThreshold) {
-          overlay.data[i    ] = 255;   // R
-          overlay.data[i + 1] =   0;   // G
-          overlay.data[i + 2] =   0;   // B
-          overlay.data[i + 3] =  80;   // A (≈30% opacity)
-        }
+  // Draw course background
+  if (courseImage) ctx.drawImage(courseImage, 0, 0, canvas.width, canvas.height);
+  // In normal mode, overlay obstacles
+  if (!isPlayback && development && collisionData) {
+    const overlay = ctx.createImageData(canvas.width, canvas.height);
+    for (let i = 0; i < collisionData.length; i += 4) {
+      if (collisionData[i + 3] > obstacleThreshold) {
+        overlay.data[i    ] = 255;
+        overlay.data[i + 1] = 0;
+        overlay.data[i + 2] = 0;
+        overlay.data[i + 3] = 80;
       }
-      ctx.putImageData(overlay, 0, 0);
     }
+    ctx.putImageData(overlay, 0, 0);
   }
-
+  // Draw all horses
   horses.forEach(h => {
     if (!h.image) return;
-
-    const diameter = h.radius * 2;
-    // Draw sprite without rotation; rotation affects movement direction only
-    const x = h.startX - diameter / 2;
-    const y = h.startY - diameter / 2;
-    ctx.drawImage(h.image, x, y, diameter, diameter);
-    applyTintToCanvas(ctx, h.tint, x, y, diameter, diameter);
-
-    // development mode radius circle
-    if (development) {
-      ctx.save();
-      ctx.globalAlpha = 1;
+    const d = h.radius * 2;
+    const x = h.startX - d / 2;
+    const y = h.startY - d / 2;
+    ctx.drawImage(h.image, x, y, d, d);
+    applyTintToCanvas(ctx, h.tint, x, y, d, d);
+    if (!isPlayback && development) {
+      // debug circle
+      ctx.save(); ctx.globalAlpha = 1;
       ctx.strokeStyle = opaqueColor(h.tint);
       ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.arc(h.startX, h.startY, h.radius, 0, 2 * Math.PI);
+      ctx.beginPath(); ctx.arc(h.startX, h.startY, h.radius, 0, 2*Math.PI); ctx.stroke();
+      // debug direction
+      const dir = Math.atan2(h.vy, h.vx);
+      ctx.beginPath(); ctx.moveTo(h.startX, h.startY);
+      ctx.lineTo(h.startX + h.radius * Math.cos(dir), h.startY + h.radius * Math.sin(dir));
       ctx.stroke();
-
-      // Draw direction line
-      const endX = h.startX + h.radius * Math.cos(h.startRotation);
-      const endY = h.startY + h.radius * Math.sin(h.startRotation);
-      ctx.beginPath();
-      ctx.moveTo(h.startX, h.startY);
-      ctx.lineTo(endX, endY);
-      ctx.stroke();
-
       ctx.restore();
     }
   });
-
-  requestAnimationFrame(draw);
+  // Schedule next draw only in normal live mode (not playback)
+  if (!isPlayback) requestAnimationFrame(draw);
 }
-draw();
 
 // {{ edit_2: define URL to the test image in src/assets }}
 const testCourseUrl = new URL('./assets/test-course.png', import.meta.url).href;
@@ -263,6 +343,25 @@ function isObstacle(x: number, y: number): boolean {
   if (xi < 0 || yi < 0 || xi >= canvas.width || yi >= canvas.height) return true;
   // alpha channel lives at index +3
   return collisionData[(yi * canvas.width + xi) * 4 + 3] > obstacleThreshold;
+}
+
+// Helper: compute obstacle surface normal via alpha gradient
+function getObstacleNormal(x: number, y: number): { nx: number; ny: number } {
+  const xi = Math.round(x);
+  const yi = Math.round(y);
+  const w = canvas.width;
+  const h = canvas.height;
+  function alphaAt(px: number, py: number): number {
+    if (px < 0 || py < 0 || px >= w || py >= h) return 0;
+    return collisionData[(py * w + px) * 4 + 3];
+  }
+  const ax = alphaAt(xi + 1, yi) - alphaAt(xi - 1, yi);
+  const ay = alphaAt(xi, yi + 1) - alphaAt(xi, yi - 1);
+  const len = Math.hypot(ax, ay);
+  if (len < 1e-6) {
+    return { nx: 0, ny: 0 };
+  }
+  return { nx: ax / len, ny: ay / len };
 }
 
 if (development) {
@@ -441,18 +540,27 @@ function rgbaToComponents(color: string): { r: number, g: number, b: number, a: 
 // {{ edit_1: encapsulate the "add horse" logic into its own function }}
 function addHorse() {
   const id = horseIdCounter++;
+  // set initial position
+  const initX = canvas.width / 2;
+  const initY = canvas.height / 2;
+  const rotation = Math.random() * 2 * Math.PI;
+  const speedVal = 3;
   const horse: Horse = {
     id,
     name: "",
     tint: "#ffffff00",
-    speed: 3,
+    speed: speedVal,
+    vx: speedVal * Math.cos(rotation),
+    vy: speedVal * Math.sin(rotation),
     spriteFile: defaultHorseSpriteFile,
     spriteUrl: testHorseUrl,
     previewEl: null,
-    startX: canvas.width / 2,
-    startY: canvas.height / 2,
+    startX: initX,
+    startY: initY,
+    initX,
+    initY,
     radius: 16,
-    startRotation: Math.random() * 2 * Math.PI
+    startRotation: rotation
   };
 
   horses.push(horse);
@@ -602,7 +710,13 @@ canvas.addEventListener("mouseleave", () => { draggingHorse = null; });
 function updateHorseStartPosition(id: number, x: number, y: number) {
   const horse = getHorseById(id);
   if (!horse) return;
+  // update initial and current positions when dragging
+  horse.initX = x;
+  horse.initY = y;
   horse.startX = x;
   horse.startY = y;
   if (development) console.log(`Horse ${id} start position updated:`, horse);
 }
+
+// Start live rendering loop
+draw();

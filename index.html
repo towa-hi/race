@@ -28,6 +28,10 @@
       width: 100%;
       height: 100%;
     }
+    #viewport canvas.simCanvas,
+    #viewport canvas#simCanvas {
+      pointer-events: none;
+    }
     #editor {
       width: 320px;
       height: 720px;
@@ -75,8 +79,9 @@
 </head>
 <body>
   <div id="app">
-    <div id="viewport">
-      <canvas id="canvas" width="960" height="720"></canvas>
+    <div id="viewport" style="position: relative;">
+      <canvas id="canvas" width="960" height="720" style="position: relative; z-index: 1;"></canvas>
+      <canvas id="simCanvas" width="960" height="720" style="position: absolute; top: 0; left: 0; pointer-events: none; z-index: 2;"></canvas>
     </div>
 
     <div id="editor">
@@ -94,6 +99,7 @@
         <button id="playBtn" style="width: 40px; height: 40px; border-radius: 50%; background: #4CAF50; border: none; color: white; cursor: pointer;">▶</button>
         <button id="pauseBtn" style="width: 40px; height: 40px; border-radius: 50%; background: #FFC107; border: none; color: white; cursor: pointer;">⏸</button>
         <button id="stopBtn" style="width: 40px; height: 40px; border-radius: 50%; background: #F44336; border: none; color: white; cursor: pointer;">⏹</button>
+        <button id="sBtn" style="width: 40px; height: 40px; border-radius: 50%; background: #9C27B0; border: none; color: white; cursor: pointer;">S</button>
       </div>
 
       <div class="bottom">
