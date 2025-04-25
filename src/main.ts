@@ -5,10 +5,133 @@ const canvas = document.getElementById("canvas") as HTMLCanvasElement;
 const ctx = canvas.getContext("2d")!;
 const addHorseBtn = document.getElementById("addHorse") as HTMLButtonElement;
 const horseList = document.getElementById("horseList") as HTMLDivElement;
+const playBtn = document.getElementById("playBtn") as HTMLButtonElement;
+const pauseBtn = document.getElementById("pauseBtn") as HTMLButtonElement;
+const stopBtn = document.getElementById("stopBtn") as HTMLButtonElement;
 
 let courseImage: HTMLImageElement | null = null;
 let collisionData: Uint8ClampedArray;
 const obstacleThreshold = 10;
+
+// Playback state
+let isPlaying = false;
+let isPaused = false;
+let animationFrameId: number | null = null;
+
+// Playback control functions
+function play() {
+  if (isPaused) {
+    isPaused = false;
+    isPlaying = true;
+    animate();
+  } else if (!isPlaying) {
+    isPlaying = true;
+    animate();
+  }
+}
+
+function pause() {
+  if (isPlaying) {
+    isPlaying = false;
+    isPaused = true;
+    if (animationFrameId !== null) {
+      cancelAnimationFrame(animationFrameId);
+      animationFrameId = null;
+    }
+  }
+}
+
+function stop() {
+  if (isPlaying || isPaused) {
+    isPlaying = false;
+    isPaused = false;
+    if (animationFrameId !== null) {
+      cancelAnimationFrame(animationFrameId);
+      animationFrameId = null;
+    }
+    // Reset horses to center
+    horses.forEach(horse => {
+      horse.startX = canvas.width / 2;
+      horse.startY = canvas.height / 2;
+    });
+  }
+}
+
+function animate() {
+  if (!isPlaying) return;
+  
+  horses.forEach(horse => {
+    let theta = horse.startRotation;
+    let dx = horse.speed * Math.cos(theta);
+    let dy = horse.speed * Math.sin(theta);
+    let newX = horse.startX + dx;
+    let newY = horse.startY + dy;
+
+    // Bounce off obstacles by sampling 16 points around the circumference
+    for (let i = 0; i < 16; i++) {
+      const sampleAngle = (2 * Math.PI * i) / 16;
+      const sx = newX + horse.radius * Math.cos(sampleAngle);
+      const sy = newY + horse.radius * Math.sin(sampleAngle);
+      if (isObstacle(sx, sy)) {
+        // Approximate normal from obstacle point to center
+        const nx = Math.cos(sampleAngle);
+        const ny = Math.sin(sampleAngle);
+        // Reflect velocity across normal
+        const dot = dx * nx + dy * ny;
+        dx = dx - 2 * dot * nx;
+        dy = dy - 2 * dot * ny;
+        theta = Math.atan2(dy, dx);
+        horse.startRotation = theta;
+        newX = horse.startX + dx;
+        newY = horse.startY + dy;
+        break;
+      }
+    }
+
+    // Bounce off other horses using surface normal reflection
+    horses.forEach(other => {
+      if (other.id !== horse.id) {
+        const dist = Math.hypot(newX - other.startX, newY - other.startY);
+        if (dist <= horse.radius + other.radius) {
+          // Normal vector from horse to other
+          const nx = (other.startX - horse.startX) / dist;
+          const ny = (other.startY - horse.startY) / dist;
+          // Reflect this horse's velocity across normal
+          const dot = dx * nx + dy * ny;
+          dx = dx - 2 * dot * nx;
+          dy = dy - 2 * dot * ny;
+          theta = Math.atan2(dy, dx);
+          horse.startRotation = theta;
+          newX = horse.startX + dx;
+          newY = horse.startY + dy;
+          // Reflect other horse's velocity similarly
+          let dx2 = other.speed * Math.cos(other.startRotation);
+          let dy2 = other.speed * Math.sin(other.startRotation);
+          const dot2 = dx2 * nx + dy2 * ny;
+          dx2 = dx2 - 2 * dot2 * nx;
+          dy2 = dy2 - 2 * dot2 * ny;
+          other.startRotation = Math.atan2(dy2, dx2);
+        }
+      }
+    });
+
+    // Wrap around edges
+    if (newX < 0) newX = canvas.width;
+    else if (newX > canvas.width) newX = 0;
+    if (newY < 0) newY = canvas.height;
+    else if (newY > canvas.height) newY = 0;
+
+    horse.startX = newX;
+    horse.startY = newY;
+  });
+
+  animationFrameId = requestAnimationFrame(animate);
+}
+
+// Add event listeners for playback controls
+playBtn.addEventListener("click", play);
+pauseBtn.addEventListener("click", pause);
+stopBtn.addEventListener("click", stop);
 
 // {{ edit_1: define Horse type and storage }}
 interface Horse {
@@ -23,6 +146,7 @@ interface Horse {
   startX: number;
   startY: number;
   radius: number;
+  startRotation: number;
 }
 let horses: Horse[] = [];
 let horseIdCounter = 1;
@@ -87,13 +211,10 @@ function draw() {
     if (!h.image) return;
 
     const diameter = h.radius * 2;
+    // Draw sprite without rotation; rotation affects movement direction only
     const x = h.startX - diameter / 2;
     const y = h.startY - diameter / 2;
-
-    // draw the base sprite
     ctx.drawImage(h.image, x, y, diameter, diameter);
-
-    // apply tint
     applyTintToCanvas(ctx, h.tint, x, y, diameter, diameter);
 
     // development mode radius circle
@@ -105,6 +226,15 @@ function draw() {
       ctx.beginPath();
       ctx.arc(h.startX, h.startY, h.radius, 0, 2 * Math.PI);
       ctx.stroke();
+
+      // Draw direction line
+      const endX = h.startX + h.radius * Math.cos(h.startRotation);
+      const endY = h.startY + h.radius * Math.sin(h.startRotation);
+      ctx.beginPath();
+      ctx.moveTo(h.startX, h.startY);
+      ctx.lineTo(endX, endY);
+      ctx.stroke();
+
       ctx.restore();
     }
   });
@@ -314,14 +444,15 @@ function addHorse() {
   const horse: Horse = {
     id,
     name: "",
-    tint: "#ffffff00",  // Changed from "rgba(255,255,255,0)" to hex format
+    tint: "#ffffff00",
     speed: 3,
     spriteFile: defaultHorseSpriteFile,
     spriteUrl: testHorseUrl,
     previewEl: null,
     startX: canvas.width / 2,
     startY: canvas.height / 2,
-    radius: 16
+    radius: 16,
+    startRotation: Math.random() * 2 * Math.PI
   };
 
   horses.push(horse);
@@ -343,26 +474,13 @@ function addHorse() {
       <button class="choose-sprite" style="flex-shrink:0;">Choose Sprite</button>
       <input id="sprite-${id}" type="file" accept="image/*" class="sprite-input" style="display:none" />
     </div>
-    <div class="horse-settings" style="display:flex; align-items:center; margin-top:8px;">
-      <label for="tint-${id}" style="margin-right:12px;">
-        Tint:
-        <input id="tint-${id}" 
-               type="text" 
-               class="coloris" 
-               value="${horse.tint}"
-               data-coloris 
-               style="width:120px;" />
-      </label>
-      <label for="speed-${id}" style="margin-left:12px;">
-        Speed:
-        <input id="speed-${id}" type="number" class="horse-speed" value="${horse.speed}" min="1" max="10" step="0.1" style="width:60px;" />
-      </label>
-      <label style="margin-left:12px;">
-        Radius:
-        <input id="radius-${id}" type="number" class="horse-radius"
-               value="${horse.radius}" min="1" step="1"
-               style="width:60px;" />
-      </label>
+    <div class="horse-settings" style="display: grid; grid-template-columns: repeat(3, 1fr); grid-auto-rows: auto; row-gap: 4px; column-gap: 12px; margin-top: 8px;">
+      <label for="tint-${id}" style="text-align: center;">Tint:</label>
+      <label for="speed-${id}" style="text-align: center;">Speed:</label>
+      <label for="radius-${id}" style="text-align: center;">Radius:</label>
+      <input id="tint-${id}" type="text" class="coloris" value="${horse.tint}" data-coloris style="width: 100%;" />
+      <input id="speed-${id}" type="number" class="horse-speed" value="${horse.speed}" min="1" max="10" step="0.1" style="width: 100%;" />
+      <input id="radius-${id}" type="number" class="horse-radius" value="${horse.radius}" min="1" step="1" style="width: 100%;" />
     </div>
   `;
 
