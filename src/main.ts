@@ -3,16 +3,12 @@ import Coloris from '@melloware/coloris';
 
 const canvas = document.getElementById("canvas") as HTMLCanvasElement;
 const ctx = canvas.getContext("2d")!;
-const courseInput = document.getElementById("courseInput") as HTMLInputElement;
-const spriteInput = document.getElementById("spriteInput") as HTMLInputElement;
-const tintInput = document.getElementById("tintInput") as HTMLInputElement;
-const nameInput = document.getElementById("nameInput") as HTMLInputElement;
-const speedInput = document.getElementById("speedInput") as HTMLInputElement;
 const addHorseBtn = document.getElementById("addHorse") as HTMLButtonElement;
-
 const horseList = document.getElementById("horseList") as HTMLDivElement;
 
 let courseImage: HTMLImageElement | null = null;
+let collisionData: Uint8ClampedArray;
+const obstacleThreshold = 10;
 
 // {{ edit_1: define Horse type and storage }}
 interface Horse {
@@ -59,10 +55,32 @@ Coloris.setInstance('.coloris', {
   ]
 });
 
+// helper: force color to full‐alpha for outlines
+function opaqueColor(color: string): string {
+  const { r, g, b } = rgbaToComponents(color);
+  return `rgba(${r},${g},${b},1)`;
+}
+
 function draw() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
+
   if (courseImage) {
     ctx.drawImage(courseImage, 0, 0, canvas.width, canvas.height);
+
+    // in dev mode, overlay obstacles in semi-transparent red
+    if (development && collisionData) {
+      const overlay = ctx.createImageData(canvas.width, canvas.height);
+      for (let i = 0; i < collisionData.length; i += 4) {
+        // alpha channel at i+3
+        if (collisionData[i + 3] > obstacleThreshold) {
+          overlay.data[i    ] = 255;   // R
+          overlay.data[i + 1] =   0;   // G
+          overlay.data[i + 2] =   0;   // B
+          overlay.data[i + 3] =  80;   // A (≈30% opacity)
+        }
+      }
+      ctx.putImageData(overlay, 0, 0);
+    }
   }
 
   horses.forEach(h => {
@@ -82,7 +100,7 @@ function draw() {
     if (development) {
       ctx.save();
       ctx.globalAlpha = 1;
-      ctx.strokeStyle = h.tint;
+      ctx.strokeStyle = opaqueColor(h.tint);
       ctx.lineWidth = 2;
       ctx.beginPath();
       ctx.arc(h.startX, h.startY, h.radius, 0, 2 * Math.PI);
@@ -101,10 +119,27 @@ const testCourseUrl = new URL('./assets/test-course.png', import.meta.url).href;
 // {{ edit_2: use development flag to auto-load the asset from src/assets }}
 const development = true;
 
+function prepareCollisionMap() {
+  const off = document.createElement('canvas');
+  off.width = canvas.width;
+  off.height = canvas.height;
+  const offCtx = off.getContext('2d')!;
+  offCtx.drawImage(courseImage!, 0, 0, canvas.width, canvas.height);
+  collisionData = offCtx.getImageData(0, 0, canvas.width, canvas.height).data;
+}
+
+function isObstacle(x: number, y: number): boolean {
+  const xi = Math.floor(x), yi = Math.floor(y);
+  if (xi < 0 || yi < 0 || xi >= canvas.width || yi >= canvas.height) return true;
+  // alpha channel lives at index +3
+  return collisionData[(yi * canvas.width + xi) * 4 + 3] > obstacleThreshold;
+}
+
 if (development) {
   const img = new Image();
   img.onload = () => {
     courseImage = img;
+    prepareCollisionMap();
   };
   img.src = testCourseUrl;
 } else {
@@ -149,6 +184,7 @@ if (development) {
       const img = new Image();
       img.onload = () => {
         courseImage = img;
+        prepareCollisionMap();
         modal.remove();
       };
       img.src = ev.target?.result as string;
@@ -213,18 +249,6 @@ function renderHorsePreview(horse: Horse) {
   // Apply tint
   applyTintToCanvas(ctx, horse.tint, 0, 0, size, size);
   
-  // Draw radius circle in development mode
-  if (development) {
-    ctx.save();
-    ctx.globalAlpha = 1;
-    ctx.strokeStyle = horse.tint;
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.arc(size/2, size/2, size/4, 0, 2 * Math.PI);
-    ctx.stroke();
-    ctx.restore();
-  }
-  
   horse.previewEl.appendChild(canvas);
 }
 
@@ -282,11 +306,6 @@ function rgbaToComponents(color: string): { r: number, g: number, b: number, a: 
     b: parseInt(hex.slice(4, 6), 16),
     a: parseInt(hex.slice(6, 8), 16) / 255
   };
-}
-
-function rgbToHex(r: number, g: number, b: number): string {
-  const toHex = (n: number) => n.toString(16).padStart(2, '0');
-  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
 }
 
 // {{ edit_1: encapsulate the "add horse" logic into its own function }}
@@ -416,25 +435,56 @@ document.querySelectorAll('div').forEach((div, i) => {
   div.style.border = `2px solid hsl(${hue},70%,50%)`;
 });
 
-function applyTintToCanvas(ctx: CanvasRenderingContext2D, tint: string, x: number, y: number, width: number, height: number) {
-  // Create temp canvas to isolate sprite pixels
-  const tempCanvas = document.createElement('canvas');
-  tempCanvas.width = width;
-  tempCanvas.height = height;
-  const tempCtx = tempCanvas.getContext('2d')!;
-
-  // Copy just the sprite area
-  tempCtx.drawImage(ctx.canvas, x, y, width, height, 0, 0, width, height);
-
-  // Apply tint to temp canvas
-  tempCtx.save();
+function applyTintToCanvas(
+  ctx: CanvasRenderingContext2D,
+  tint: string,
+  x: number,
+  y: number,
+  width: number,
+  height: number
+) {
+  ctx.save();
   const { a } = rgbaToComponents(tint);
-  tempCtx.globalAlpha = a;
-  tempCtx.globalCompositeOperation = 'source-atop';
-  tempCtx.fillStyle = tint;
-  tempCtx.fillRect(0, 0, width, height);
-  tempCtx.restore();
+  ctx.globalAlpha = a;
+  ctx.globalCompositeOperation = 'source-atop';
+  ctx.fillStyle = tint;
+  ctx.fillRect(x, y, width, height);
+  ctx.restore();
+}
 
-  // Draw tinted result back to main canvas
-  ctx.drawImage(tempCanvas, x, y);
+// {{ edit_drag: enable dragging of horses on canvas }}
+let draggingHorse: Horse | null = null;
+
+canvas.addEventListener("mousedown", (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const x = (e.clientX - rect.left) * (canvas.width / rect.width);
+  const y = (e.clientY - rect.top) * (canvas.height / rect.height);
+  // pick topmost horse under cursor
+  for (let i = horses.length - 1; i >= 0; i--) {
+    const h = horses[i];
+    if (Math.hypot(x - h.startX, y - h.startY) <= h.radius) {
+      draggingHorse = h;
+      break;
+    }
+  }
+});
+
+canvas.addEventListener("mousemove", (e) => {
+  if (!draggingHorse) return;
+  const rect = canvas.getBoundingClientRect();
+  const x = (e.clientX - rect.left) * (canvas.width  / rect.width);
+  const y = (e.clientY - rect.top ) * (canvas.height / rect.height);
+  updateHorseStartPosition(draggingHorse.id, x, y);
+});
+
+canvas.addEventListener("mouseup",   () => { draggingHorse = null; });
+canvas.addEventListener("mouseleave", () => { draggingHorse = null; });
+
+// {{ edit_drag: extract start‐position update into its own function }}
+function updateHorseStartPosition(id: number, x: number, y: number) {
+  const horse = getHorseById(id);
+  if (!horse) return;
+  horse.startX = x;
+  horse.startY = y;
+  if (development) console.log(`Horse ${id} start position updated:`, horse);
 }
